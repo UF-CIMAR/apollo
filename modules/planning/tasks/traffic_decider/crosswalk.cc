@@ -30,6 +30,7 @@
 #include "modules/perception/proto/perception_obstacle.pb.h"
 #include "modules/planning/common/frame.h"
 #include "modules/planning/common/planning_gflags.h"
+#include "modules/planning/tasks/traffic_decider/util.h"
 
 namespace apollo {
 namespace planning {
@@ -45,6 +46,9 @@ Crosswalk::Crosswalk(const RuleConfig& config) : TrafficRule(config) {}
 
 bool Crosswalk::ApplyRule(Frame* frame,
                           ReferenceLineInfo* const reference_line_info) {
+  CHECK_NOTNULL(frame);
+  CHECK_NOTNULL(reference_line_info);
+
   if (!FLAGS_enable_crosswalk) {
     return true;
   }
@@ -57,8 +61,11 @@ bool Crosswalk::ApplyRule(Frame* frame,
   return true;
 }
 
-void Crosswalk::MakeDecisions(Frame* frame,
+void Crosswalk::MakeDecisions(Frame* const frame,
                               ReferenceLineInfo* const reference_line_info) {
+  CHECK_NOTNULL(frame);
+  CHECK_NOTNULL(reference_line_info);
+
   auto* path_decision = reference_line_info->path_decision();
   double adc_front_edge_s = reference_line_info->AdcSlBoundary().end_s();
 
@@ -129,7 +136,7 @@ void Crosswalk::MakeDecisions(Frame* frame,
       bool is_on_road =
           reference_line_info->reference_line().HasOverlap(obstacle_box);
       bool is_path_cross =
-          path_obstacle->reference_line_st_boundary().IsEmpty();
+          !path_obstacle->reference_line_st_boundary().IsEmpty();
 
       ADEBUG << "obstacle_id[" << obstacle_id
           << "] type[" << obstacle_type_name
@@ -176,9 +183,9 @@ void Crosswalk::MakeDecisions(Frame* frame,
       }
 
       // stop decision
-      double stop_deceleration =
-          GetStopDeceleration(reference_line_info, crosswalk_overlap);
-      if (stop_deceleration < FLAGS_stop_max_deceleration) {
+      double stop_deceleration = util::GetADCStopDeceleration(
+          reference_line_info, crosswalk_overlap->start_s);
+      if (stop_deceleration < FLAGS_max_stop_deceleration) {
         crosswalks_to_stop.push_back(crosswalk_overlap);
         ADEBUG << "crosswalk_id[" << crosswalk_id << "] STOP";
       }
@@ -186,11 +193,14 @@ void Crosswalk::MakeDecisions(Frame* frame,
   }
 
   for (auto crosswalk_to_stop : crosswalks_to_stop) {
-    BuildStopDecision(frame, reference_line_info, crosswalk_to_stop);
+    BuildStopDecision(frame, reference_line_info,
+                      const_cast<hdmap::PathOverlap*>(crosswalk_to_stop));
   }
 }
 
 bool Crosswalk::FindCrosswalks(ReferenceLineInfo* const reference_line_info) {
+  CHECK_NOTNULL(reference_line_info);
+
   crosswalk_overlaps_.clear();
   const std::vector<hdmap::PathOverlap>& crosswalk_overlaps =
       reference_line_info->reference_line().map_path().crosswalk_overlaps();
@@ -200,33 +210,14 @@ bool Crosswalk::FindCrosswalks(ReferenceLineInfo* const reference_line_info) {
   return crosswalk_overlaps_.size() > 0;
 }
 
-double Crosswalk::GetStopDeceleration(
-    ReferenceLineInfo* const reference_line_info,
-    const hdmap::PathOverlap* crosswalk_overlap) {
-  double adc_speed =
-      common::VehicleStateProvider::instance()->linear_velocity();
-  if (adc_speed < FLAGS_stop_max_speed) {
-    return 0.0;
-  }
-  double stop_distance = 0;
-  double adc_front_s = reference_line_info->AdcSlBoundary().end_s();
-  double stop_line_s = crosswalk_overlap->start_s;
-
-  if (stop_line_s > adc_front_s) {
-    stop_distance = stop_line_s - adc_front_s;
-  } else {
-    stop_distance = stop_line_s + FLAGS_stop_max_distance_buffer - adc_front_s;
-  }
-  if (stop_distance < 1e-5) {
-    return std::numeric_limits<double>::max();
-  }
-  return (adc_speed * adc_speed) / (2 * stop_distance);
-}
-
 bool Crosswalk::BuildStopDecision(
-    Frame* frame,
+    Frame* const frame,
     ReferenceLineInfo* const reference_line_info,
-    const hdmap::PathOverlap* crosswalk_overlap) {
+    hdmap::PathOverlap* const crosswalk_overlap) {
+  CHECK_NOTNULL(frame);
+  CHECK_NOTNULL(reference_line_info);
+  CHECK_NOTNULL(crosswalk_overlap);
+
   // check
   const auto& reference_line = reference_line_info->reference_line();
   if (!WithinBound(0.0, reference_line.Length(), crosswalk_overlap->start_s)) {
@@ -252,14 +243,14 @@ bool Crosswalk::BuildStopDecision(
 
   // build stop decision
   const double stop_s =
-      crosswalk_overlap->start_s - FLAGS_stop_distance_crosswalk;
+      crosswalk_overlap->start_s - FLAGS_crosswalk_stop_distance;
   auto stop_point = reference_line.GetReferencePoint(stop_s);
   double stop_heading = reference_line.GetReferencePoint(stop_s).heading();
 
   ObjectDecisionType stop;
   auto stop_decision = stop.mutable_stop();
   stop_decision->set_reason_code(StopReasonCode::STOP_REASON_CROSSWALK);
-  stop_decision->set_distance_s(-FLAGS_stop_distance_crosswalk);
+  stop_decision->set_distance_s(-FLAGS_crosswalk_stop_distance);
   stop_decision->set_stop_heading(stop_heading);
   stop_decision->mutable_stop_point()->set_x(stop_point.x());
   stop_decision->mutable_stop_point()->set_y(stop_point.y());
